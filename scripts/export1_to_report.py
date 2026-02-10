@@ -3,10 +3,10 @@ import argparse
 from datetime import datetime, date
 from pathlib import Path
 import re
-import zipfile
+import os
 import pandas as pd
+import zipfile
 import openpyxl
-from openpyxl.cell.cell import MergedCell
 
 HEADER_ROW = [
     "State", "Policy", "Job", "Schedule", "Client", "Media", "Server",
@@ -32,86 +32,35 @@ COL_UNIT = 21
 REPORT_GLOB = "/home/owen/벽산 리포트_백업상태_최종(양식)_*.xlsx"
 
 
-def _format_num_like(orig: str, value: int) -> str:
-    s = str(orig) if orig is not None else ""
-    lead_space = s.startswith(" ")
-    digits = s.strip()
-    width = len(digits)
-    if width >= 2:
-        out = f"{value:0{width}d}"
-    else:
-        out = str(value)
-    return f" {out}" if lead_space else out
+def _rewrite_zip_entry(src_path: str, entry_name: str, new_bytes: bytes) -> None:
+    tmp_path = f"{src_path}.tmp"
+    with zipfile.ZipFile(src_path, "r") as zin, zipfile.ZipFile(tmp_path, "w") as zout:
+        for item in zin.infolist():
+            if item.filename == entry_name:
+                zout.writestr(item, new_bytes)
+            else:
+                zout.writestr(item, zin.read(item.filename))
+    os.replace(tmp_path, src_path)
 
 
-def _weekday_kr(d: date) -> str:
-    # Monday=0
-    names = ["월", "화", "수", "목", "금", "토", "일"]
-    return names[d.weekday()]
+def _load_shared_strings(xml_bytes: bytes) -> list[str]:
+    xml_text = xml_bytes.decode("utf-8", "ignore")
+    return re.findall(r"<t[^>]*>(.*?)</t>", xml_text)
 
 
-def _update_cover_date_in_drawing(report_path: str) -> None:
-    # Cover sheet date is stored in drawing1.xml as text runs.
-    # Update year/month/day/weekday to today's date.
-    try:
-        with zipfile.ZipFile(report_path, "r") as z:
-            try:
-                drawing_xml = z.read("xl/drawings/drawing1.xml")
-            except KeyError:
-                return
-    except Exception:
-        return
+def _update_formula_in_cell(sheet_xml: str, cell_ref: str, formula: str, value: str) -> str:
+    pat = re.compile(rf"<c[^>]*r=\"{cell_ref}\"[^>]*(?:/>|>.*?</c>)", re.DOTALL)
 
-    from xml.etree import ElementTree as ET
+    def repl(m: re.Match) -> str:
+        tag = m.group(0)
+        m_attrs = re.search(r"<c([^>]*)", tag)
+        attrs = m_attrs.group(1).strip() if m_attrs else ""
+        attrs = attrs.rstrip("/").strip()
+        new_cell = f"<c {attrs}><f>{formula}</f><v>{value}</v></c>"
+        return re.sub(r"\\s+", " ", new_cell).replace("  ", " ")
 
-    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
-    root = ET.fromstring(drawing_xml)
-    text_nodes = root.findall(".//a:t", ns)
-    texts = [t.text or "" for t in text_nodes]
-
-    today = date.today()
-    updated = False
-
-    # Pattern: YYYY 년 M 월 YYYY 년 MM 월 DD 일 요일
-    for i in range(len(texts) - 9):
-        if not re.fullmatch(r"\d{4}", texts[i] or ""):
-            continue
-        if "년" not in texts[i + 1]:
-            continue
-        if "월" not in texts[i + 3]:
-            continue
-        if not re.fullmatch(r"\d{4}", texts[i + 4] or ""):
-            continue
-        if "년" not in texts[i + 5]:
-            continue
-        if "월" not in texts[i + 7]:
-            continue
-        if "일" not in texts[i + 9]:
-            continue
-
-        text_nodes[i].text = str(today.year)
-        text_nodes[i + 2].text = _format_num_like(texts[i + 2], today.month)
-        text_nodes[i + 4].text = str(today.year)
-        text_nodes[i + 6].text = _format_num_like(texts[i + 6], today.month)
-        text_nodes[i + 8].text = _format_num_like(texts[i + 8], today.day)
-        text_nodes[i + 9].text = f"일 {_weekday_kr(today)}요일"
-        updated = True
-        break
-
-    if not updated:
-        # Fallback: update year and weekday if present
-        for t in text_nodes:
-            if re.fullmatch(r"\d{4}", t.text or ""):
-                t.text = str(today.year)
-        for t in text_nodes:
-            if t.text and "요일" in t.text and "일" in t.text:
-                t.text = f"일 {_weekday_kr(today)}요일"
-
-    new_xml = ET.tostring(root, encoding="utf-8", xml_declaration=False)
-
-    # Rewrite drawing1.xml inside the xlsx
-    with zipfile.ZipFile(report_path, "a") as z:
-        z.writestr("xl/drawings/drawing1.xml", new_xml)
+    new_xml, n = pat.subn(repl, sheet_xml, count=1)
+    return new_xml if n else sheet_xml
 
 
 def build_parsed_df(export1_path: str, include_all_dates: bool = False) -> pd.DataFrame:
@@ -311,25 +260,47 @@ def update_report(report_path: str, parsed_path: str):
     prev_report = _find_previous_report(report_path)
     prev_values = _read_previous_values(prev_report) if prev_report else {}
 
-    wb = openpyxl.load_workbook(report_path)
-    ws = wb["백업상태 점검_일일점검"]
+    with zipfile.ZipFile(report_path, "r") as z:
+        sheet_xml = z.read("xl/worksheets/sheet2.xml").decode("utf-8", "ignore")
+        sst_xml = z.read("xl/sharedStrings.xml")
 
-    # update inspection date
-    for row in ws.iter_rows(min_row=1, max_row=10, min_col=1, max_col=10):
-        for cell in row:
-            v = cell.value
-            if isinstance(v, str) and "점검일시" in v:
-                cell.value = f"점검일시 : {date.today().isoformat()}"
+    strings = _load_shared_strings(sst_xml)
+    policy_rows: dict[str, int] = {}
+    label_rows: dict[str, int] = {}
+
+    cell_pat = re.compile(r"<c[^>]*r=\"([A-Z]+)(\d+)\"[^>]*t=\"s\"[^>]*>.*?<v>(\d+)</v>.*?</c>", re.DOTALL)
+    for col, row_str, idx_str in cell_pat.findall(sheet_xml):
+        try:
+            idx = int(idx_str)
+        except ValueError:
+            continue
+        if not (0 <= idx < len(strings)):
+            continue
+        val = strings[idx].strip()
+        if not val:
+            continue
+        row_num = int(row_str)
+        if col == "C":
+            policy_rows.setdefault(val, row_num)
+        elif col == "D":
+            label_rows.setdefault(val, row_num)
+
 
     # fill backup volume for policy rows (col C => col E)
-    for row in ws.iter_rows(min_row=1, max_row=200, min_col=3, max_col=3):
-        cell = row[0]
-        v = cell.value
-        if isinstance(v, str):
-            pol = v.strip()
-            if pol in agg:
-                unit_sum = int(agg[pol])
-                ws.cell(cell.row, 5).value = f"={unit_sum}/(1024*1024)"
+    updates = 0
+    for pol, unit_sum in agg.items():
+        row_num = policy_rows.get(str(pol).strip())
+        if row_num:
+            gb_val = _format_gb(unit_sum / 1024 / 1024)
+            new_xml = _update_formula_in_cell(
+                sheet_xml,
+                f"E{row_num}",
+                f"{int(unit_sum)}/(1024*1024)",
+                gb_val,
+            )
+            if new_xml != sheet_xml:
+                updates += 1
+            sheet_xml = new_xml
 
     # HZDB_MSSQL split rows in col D
     label_map = {
@@ -337,54 +308,22 @@ def update_report(report_path: str, parsed_path: str):
         "SMS": "HZDB_MSSQL_SMS",
         "NEOE": "HZDB_MSSQL_NEOE",
     }
-    for row in ws.iter_rows(min_row=1, max_row=200, min_col=4, max_col=4):
-        cell = row[0]
-        v = cell.value
-        if isinstance(v, str) and v.strip() in label_map:
-            pol = label_map[v.strip()]
-            if pol in agg:
-                unit_sum = int(agg[pol])
-                ws.cell(cell.row, 5).value = f"={unit_sum}/(1024*1024)"
+    for label, key in label_map.items():
+        if key in agg:
+            row_num = label_rows.get(label)
+            if row_num:
+                gb_val = _format_gb(agg[key] / 1024 / 1024)
+                new_xml = _update_formula_in_cell(
+                    sheet_xml,
+                    f"E{row_num}",
+                    f"{int(agg[key])}/(1024*1024)",
+                    gb_val,
+                )
+                if new_xml != sheet_xml:
+                    updates += 1
+                sheet_xml = new_xml
 
-    # update remarks if delta >= 10GB, except ERP-APP
-    for row in ws.iter_rows(min_row=1, max_row=200, min_col=3, max_col=8):
-        policy_cell = row[0]  # col C
-        remark_cell = row[5]  # col H
-        pol = policy_cell.value.strip() if isinstance(policy_cell.value, str) else ""
-        if not pol:
-            continue
-        if isinstance(remark_cell, MergedCell):
-            continue
-        if pol == "ERP-APP":
-            # keep existing remark
-            continue
-        if pol in current_gb and pol in prev_values:
-            cur = current_gb[pol]
-            prev = prev_values[pol]
-            diff = cur - prev
-            if abs(diff) >= 10:
-                trend = "증가" if diff > 0 else "감소"
-                remark_cell.value = f"{_format_gb(prev)}GB -> {_format_gb(cur)}GB ({_format_gb(abs(diff))}GB{trend})"
-
-    # HZDB split remark rows by label in col D
-    for row in ws.iter_rows(min_row=1, max_row=200, min_col=4, max_col=8):
-        label_cell = row[0]  # col D
-        remark_cell = row[4]  # col H
-        label = label_cell.value.strip() if isinstance(label_cell.value, str) else ""
-        if label in label_map:
-            if isinstance(remark_cell, MergedCell):
-                continue
-            key = label_map[label]
-            if key in current_gb and key in prev_values:
-                cur = current_gb[key]
-                prev = prev_values[key]
-                diff = cur - prev
-                if abs(diff) >= 10:
-                    trend = "증가" if diff > 0 else "감소"
-                    remark_cell.value = f"{_format_gb(prev)}GB -> {_format_gb(cur)}GB ({_format_gb(abs(diff))}GB{trend})"
-
-    wb.save(report_path)
-    _update_cover_date_in_drawing(report_path)
+    _rewrite_zip_entry(report_path, "xl/worksheets/sheet2.xml", sheet_xml.encode("utf-8"))
 
 
 def main():
