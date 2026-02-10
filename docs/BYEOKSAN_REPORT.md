@@ -107,3 +107,10 @@ Export1.xlsx 자동 감시:
 ```bash
 bash /root/workspace/my-codex-repo/scripts/watch_export1.sh
 ```
+
+---
+
+## Codex 복구/운영 프롬프트
+
+아래 문서 참고:
+`docs/CODEX_PROMPTS.md`
