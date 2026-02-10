@@ -3,6 +3,7 @@ import argparse
 from datetime import datetime, date
 from pathlib import Path
 import re
+import zipfile
 import pandas as pd
 import openpyxl
 from openpyxl.cell.cell import MergedCell
@@ -28,7 +29,89 @@ COL_END_TIME = 18
 COL_STORAGE_UNIT = 19
 COL_UNIT = 21
 
-REPORT_GLOB = "/home/owen/벽산 리포트_백업상태(양식)_*.xlsx"
+REPORT_GLOB = "/home/owen/벽산 리포트_백업상태_최종(양식)_*.xlsx"
+
+
+def _format_num_like(orig: str, value: int) -> str:
+    s = str(orig) if orig is not None else ""
+    lead_space = s.startswith(" ")
+    digits = s.strip()
+    width = len(digits)
+    if width >= 2:
+        out = f"{value:0{width}d}"
+    else:
+        out = str(value)
+    return f" {out}" if lead_space else out
+
+
+def _weekday_kr(d: date) -> str:
+    # Monday=0
+    names = ["월", "화", "수", "목", "금", "토", "일"]
+    return names[d.weekday()]
+
+
+def _update_cover_date_in_drawing(report_path: str) -> None:
+    # Cover sheet date is stored in drawing1.xml as text runs.
+    # Update year/month/day/weekday to today's date.
+    try:
+        with zipfile.ZipFile(report_path, "r") as z:
+            try:
+                drawing_xml = z.read("xl/drawings/drawing1.xml")
+            except KeyError:
+                return
+    except Exception:
+        return
+
+    from xml.etree import ElementTree as ET
+
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    root = ET.fromstring(drawing_xml)
+    text_nodes = root.findall(".//a:t", ns)
+    texts = [t.text or "" for t in text_nodes]
+
+    today = date.today()
+    updated = False
+
+    # Pattern: YYYY 년 M 월 YYYY 년 MM 월 DD 일 요일
+    for i in range(len(texts) - 9):
+        if not re.fullmatch(r"\d{4}", texts[i] or ""):
+            continue
+        if "년" not in texts[i + 1]:
+            continue
+        if "월" not in texts[i + 3]:
+            continue
+        if not re.fullmatch(r"\d{4}", texts[i + 4] or ""):
+            continue
+        if "년" not in texts[i + 5]:
+            continue
+        if "월" not in texts[i + 7]:
+            continue
+        if "일" not in texts[i + 9]:
+            continue
+
+        text_nodes[i].text = str(today.year)
+        text_nodes[i + 2].text = _format_num_like(texts[i + 2], today.month)
+        text_nodes[i + 4].text = str(today.year)
+        text_nodes[i + 6].text = _format_num_like(texts[i + 6], today.month)
+        text_nodes[i + 8].text = _format_num_like(texts[i + 8], today.day)
+        text_nodes[i + 9].text = f"일 {_weekday_kr(today)}요일"
+        updated = True
+        break
+
+    if not updated:
+        # Fallback: update year and weekday if present
+        for t in text_nodes:
+            if re.fullmatch(r"\d{4}", t.text or ""):
+                t.text = str(today.year)
+        for t in text_nodes:
+            if t.text and "요일" in t.text and "일" in t.text:
+                t.text = f"일 {_weekday_kr(today)}요일"
+
+    new_xml = ET.tostring(root, encoding="utf-8", xml_declaration=False)
+
+    # Rewrite drawing1.xml inside the xlsx
+    with zipfile.ZipFile(report_path, "a") as z:
+        z.writestr("xl/drawings/drawing1.xml", new_xml)
 
 
 def build_parsed_df(export1_path: str, include_all_dates: bool = False) -> pd.DataFrame:
@@ -155,7 +238,7 @@ def _format_gb(val: float) -> str:
 def _find_previous_report(current_report: str) -> str | None:
     # find latest dated report before today (by filename tag)
     candidates = []
-    for p in Path("/home/owen").glob("벽산 리포트_백업상태(양식)_*.xlsx"):
+    for p in Path("/home/owen").glob("벽산 리포트_백업상태_최종(양식)_*.xlsx"):
         name = p.name
         m = re.search(r"_(\d{8})\.xlsx$", name)
         if not m:
@@ -301,6 +384,7 @@ def update_report(report_path: str, parsed_path: str):
                     remark_cell.value = f"{_format_gb(prev)}GB -> {_format_gb(cur)}GB ({_format_gb(abs(diff))}GB{trend})"
 
     wb.save(report_path)
+    _update_cover_date_in_drawing(report_path)
 
 
 def main():

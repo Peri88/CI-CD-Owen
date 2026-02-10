@@ -3,7 +3,7 @@
 이 문서는 이 레포에 있는 "벽산 리포트 자동 생성" 스크립트들의 역할과 흐름을 정리합니다.
 
 **요약**
-- 엑셀 리포트 생성: `Export1.xlsx`를 파싱해서 `벽산 리포트_백업상태(양식)_YYYYMMDD.xlsx`를 생성/갱신
+- 엑셀 리포트 생성: `Export1.xlsx`를 파싱해서 `벽산 리포트_백업상태_최종(양식)_YYYYMMDD.xlsx`를 생성/갱신
 - PDF 리포트 생성: NetBackup 텍스트 Export를 PDF 템플릿에 채워 `NetBackup_Report_YYYYMMDD_HHMMSS.pdf` 생성
 - 자동 실행: `Export1.xlsx` 변경 감지 시 자동 실행 가능
 
@@ -13,11 +13,11 @@
 
 **입력**
 - `/home/owen/Export1.xlsx` (NetBackup Export1 엑셀)
-- `/home/owen/벽산 리포트_백업상태(양식).xlsx` (기본 템플릿)
+- `/home/owen/벽산 리포트_백업상태_최종(양식).xlsx` (기본 템플릿)
 
 **출력**
 - `/home/owen/Export(가공)_YYYYMMDD.xlsx` (가공된 Export1)
-- `/home/owen/벽산 리포트_백업상태(양식)_YYYYMMDD.xlsx` (최종 리포트)
+- `/home/owen/벽산 리포트_백업상태_최종(양식)_YYYYMMDD.xlsx` (최종 리포트)
 - Windows 경로 복사본: `/mnt/c/Users/goust/OneDrive/바탕 화면/22/OneDrive/owen_잡/4. 벽산/`
 
 **흐름**
@@ -41,6 +41,7 @@
 **주의 포인트**
 - 경로가 하드코딩 되어 있음(`/home/owen`, Windows OneDrive 경로)
 - 리포트 템플릿 파일명이 정확해야 함
+- 표지 시트의 날짜는 생성일 기준으로 자동 갱신됨
 
 ---
 
